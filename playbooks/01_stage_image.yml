@@ -1,5 +1,5 @@
 ---
-# IOS XE upgrade, part 1: get the image onto bootflash and verify it.
+# IOS XE upgrade, part 1: get the image onto the device's flash and verify it.
 # One device per run. Everything is asked interactively.
 #
 #   ansible-playbook stage_image.yml
@@ -7,12 +7,12 @@
 # Steps
 #   1. Ask for the device IP or FQDN
 #   2. Ask for username and password, then check SSH, log in, show hostname
-#      and version, and confirm it is the right router
+#      and version, and confirm it is the right device
 #   3. Ask for the image file name (as on the Cisco download page)
 #   4. Ask for the MD5 or SHA512 hash
-#   5. Check whether the image is already on bootflash
+#   5. Check whether the image is already on flash
 #   6. If not: you copy it, or the playbook copies it (push from this server
-#      or the router pulls from an SCP server), after a free-space check
+#      or the device pulls from an SCP server), after a free-space check
 #   7. Verify the hash; on a mismatch, you or the playbook deletes the bad file
 
 # ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@
   gather_facts: false
 
   vars:
-    # Free space required when the router pulls the file (its size is not known
+    # Free space required when the device pulls the file (its size is not known
     # in advance). A push uses the real file size from this server instead.
     pull_min_free_bytes: 2147483648
     # Long-running commands: copying and hashing a ~750 MB image.
@@ -95,7 +95,7 @@
         device_hostname: "{{ (show_version.stdout[0] | regex_search('^(\\S+) uptime is', '\\1', multiline=True) or ['unknown']) | first }}"
         device_version: "{{ (show_version.stdout[0] | regex_search('Cisco IOS XE Software, Version (\\S+)', '\\1') or ['unknown']) | first }}"
 
-    - name: Step 2 - is this the right router?
+    - name: Step 2 - is this the right device?
       ansible.builtin.pause:
         prompt: |
 
@@ -103,18 +103,18 @@
             Hostname: {{ device_hostname }}
             Version:  {{ device_version }}
 
-          Is this the right router? (yes/no)
+          Is this the right device? (yes/no)
       register: confirm_router
 
-    - name: Stop if it is not the right router
+    - name: Stop if it is not the right device
       ansible.builtin.fail:
-        msg: "Stopped: you said {{ device_hostname }} is not the right router."
+        msg: "Stopped: you said {{ device_hostname }} is not the right device."
       when: confirm_router.user_input | trim | lower not in ['y', 'yes']
 
     # ----- Step 3: image file name ----------------------------------------
     - name: Step 3 - image file name
       ansible.builtin.pause:
-        prompt: "Step 3 - Image file name as shown on the Cisco download page (e.g. c8000aep-universalk9.17.12.08.SPA.bin)"
+        prompt: "Step 3 - Image file name as shown on the Cisco download page (e.g. cat9k_iosxe.17.12.04.SPA.bin)"
       register: image_answer
 
     - name: Step 3 - check the file name and work out the version
@@ -127,7 +127,7 @@
         that:
           - image_file is match('^[A-Za-z0-9._-]+\.bin$')
           - image_version | length > 0
-        fail_msg: "'{{ image_file }}' does not look like an IOS XE image name (expected something like c8000aep-universalk9.17.12.08.SPA.bin)."
+        fail_msg: "'{{ image_file }}' does not look like an IOS XE image name (expected something like cat9k_iosxe.17.12.08.SPA.bin)."
         success_msg: "Image {{ image_file }}, version {{ image_version }}"
 
     # ----- Step 4: hash ----------------------------------------------------
@@ -150,11 +150,17 @@
         fail_msg: "The hash must be 32 (MD5) or 128 (SHA512) hex characters; you entered {{ image_hash | length }} characters."
         success_msg: "Hash type: {{ hash_type | upper }}"
 
-    # ----- Step 5: already on bootflash? ------------------------------------
-    - name: Step 5 - list bootflash
+    # ----- Step 5: already on flash? ---------------------------------------
+    # "dir" with no argument lists the device's default file system, which is
+    # bootflash: on ASR1k/ISR4k/C8000 and flash: on Catalyst 9000.
+    - name: Step 5 - list the default file system
       cisco.ios.ios_command:
-        commands: "dir bootflash:"
+        commands: "dir"
       register: dir_before
+
+    - name: Step 5 - record the file system name
+      ansible.builtin.set_fact:
+        flash_fs: "{{ (dir_before.stdout[0] | regex_search('Directory of (\\S+?):', '\\1') or ['bootflash']) | first }}"
 
     - name: Step 5 - is the image there?
       ansible.builtin.set_fact:
@@ -164,11 +170,11 @@
     - name: Step 5 - result
       ansible.builtin.debug:
         msg: >-
-          {{ image_file }} is {{ 'already' if image_on_flash | bool else 'not' }} on bootflash.
+          {{ image_file }} is {{ 'already' if image_on_flash | bool else 'not' }} on {{ flash_fs }}:.
           {{ 'Skipping to step 7.' if image_on_flash | bool else 'Going to step 6.' }}
           Free space: {{ bytes_free }} bytes.
 
-    # ----- Step 6: get the image onto bootflash ----------------------------
+    # ----- Step 6: get the image onto flash --------------------------------
     - name: Step 6 - copy the image
       when: not image_on_flash | bool
       block:
@@ -176,7 +182,7 @@
           ansible.builtin.pause:
             prompt: |
 
-              {{ image_file }} is not on bootflash of {{ device_hostname }}.
+              {{ image_file }} is not on {{ flash_fs }}: of {{ device_hostname }}.
               Will you copy it yourself, or should the playbook copy it? (me/playbook)
           register: copy_who
 
@@ -189,7 +195,7 @@
         - name: Step 6 - wait while you copy the file
           when: copy_who.user_input | trim | lower == 'me'
           ansible.builtin.pause:
-            prompt: "Copy {{ image_file }} to bootflash: on {{ device_hostname }}, then press Enter"
+            prompt: "Copy {{ image_file }} to {{ flash_fs }}: on {{ device_hostname }}, then press Enter"
 
         # --- The playbook copies it ---
         - name: Step 6 - playbook copy
@@ -199,8 +205,8 @@
               ansible.builtin.pause:
                 prompt: |
 
-                  push = send the file from this Ansible server to the router
-                  pull = the router fetches it from an SCP server
+                  push = send the file from this Ansible server to the device
+                  pull = the device fetches it from an SCP server
                   Push or pull? (push/pull)
               register: copy_how
 
@@ -237,30 +243,30 @@
                     that: local_stat.stat.exists and local_stat.stat.isreg
                     fail_msg: "{{ local_image }} not found on this server."
 
-                - name: Step 6 - stop if bootflash is too small
+                - name: Step 6 - stop if flash is too small
                   ansible.builtin.assert:
                     that: bytes_free | int >= local_stat.stat.size | int
                     fail_msg: >-
-                      Not enough space on bootflash: {{ bytes_free }} bytes free,
+                      Not enough space on {{ flash_fs }}: {{ bytes_free }} bytes free,
                       {{ local_stat.stat.size }} bytes needed. Nothing was copied.
 
                 - name: Step 6 - push {{ image_file }} over SCP (this can take a while)
                   ansible.netcommon.net_put:
                     src: "{{ local_image }}"
-                    dest: "bootflash:{{ image_file }}"
+                    dest: "{{ flash_fs }}:{{ image_file }}"
                     protocol: scp
                   vars:
                     ansible_command_timeout: "{{ copy_timeout }}"
 
-            # Router pulls from an SCP server
+            # Device pulls from an SCP server
             - name: Step 6 - pull
               when: copy_how.user_input | trim | lower == 'pull'
               block:
-                - name: Step 6 - stop if bootflash is too small
+                - name: Step 6 - stop if flash is too small
                   ansible.builtin.assert:
                     that: bytes_free | int >= pull_min_free_bytes | int
                     fail_msg: >-
-                      Not enough space on bootflash: {{ bytes_free }} bytes free,
+                      Not enough space on {{ flash_fs }}: {{ bytes_free }} bytes free,
                       at least {{ pull_min_free_bytes }} bytes needed. Nothing was copied.
 
                 - name: Step 6 - SCP server
@@ -285,13 +291,13 @@
                   register: scp_password
                   no_log: true
 
-                - name: Step 6 - router pulls {{ image_file }} (this can take a while)
+                - name: Step 6 - device pulls {{ image_file }} (this can take a while)
                   cisco.ios.ios_command:
                     commands:
                       - command: >-
                           copy scp://{{ scp_user.user_input | trim }}@{{ scp_server.user_input | trim
                           }}/{{ scp_dir.user_input | trim | regex_replace('^/+', '') | regex_replace('/+$', '')
-                          }}/{{ image_file }} bootflash:{{ image_file }}
+                          }}/{{ image_file }} {{ flash_fs }}:{{ image_file }}
                         prompt:
                           - 'Destination filename \[.*\]\?'
                           - '[Pp]assword:'
@@ -303,25 +309,25 @@
                   no_log: true
 
         # --- Either way: check the file arrived ---
-        - name: Step 6 - list bootflash again
+        - name: Step 6 - list flash again
           cisco.ios.ios_command:
-            commands: "dir bootflash:"
+            commands: "dir {{ flash_fs }}:"
           register: dir_after
 
         - name: Step 6 - stop if the image is still not there
           ansible.builtin.assert:
             that: dir_after.stdout[0] is search('\\s' ~ (image_file | regex_escape) ~ '\\s*$', multiline=True)
-            fail_msg: "{{ image_file }} is still not on bootflash. Stopping."
-            success_msg: "{{ image_file }} is on bootflash."
+            fail_msg: "{{ image_file }} is still not on {{ flash_fs }}:. Stopping."
+            success_msg: "{{ image_file }} is on {{ flash_fs }}:."
 
     # ----- Step 7: verify the hash -----------------------------------------
     - name: Step 7 - verify {{ hash_type | upper }} (this can take a few minutes)
       cisco.ios.ios_command:
-        commands: "verify /{{ hash_type }} bootflash:{{ image_file }} {{ image_hash }}"
+        commands: "verify /{{ hash_type }} {{ flash_fs }}:{{ image_file }} {{ image_hash }}"
       vars:
         ansible_command_timeout: "{{ verify_timeout }}"
       register: verify_result
-      ignore_errors: true  # a mismatch is reported as an error by the router
+      ignore_errors: true  # a mismatch is reported as an error by the device
 
     - name: Step 7 - result
       ansible.builtin.set_fact:
@@ -335,7 +341,7 @@
     - name: Step 7 - hash does not match
       when: not hash_ok | bool
       block:
-        - name: Step 7 - show what the router said
+        - name: Step 7 - show what the device said
           ansible.builtin.debug:
             msg: "{{ verify_result.stdout | default(verify_result.msg | default('no output')) }}"
 
@@ -343,19 +349,19 @@
           ansible.builtin.pause:
             prompt: |
 
-              The {{ hash_type | upper }} of bootflash:{{ image_file }} does not match.
+              The {{ hash_type | upper }} of {{ flash_fs }}:{{ image_file }} does not match.
               Will you delete the file yourself, or should the playbook delete it? (me/playbook)
           register: delete_who
 
         - name: Step 7 - delete the bad file
           when: delete_who.user_input | trim | lower == 'playbook'
           cisco.ios.ios_command:
-            commands: "delete /force bootflash:{{ image_file }}"
+            commands: "delete /force {{ flash_fs }}:{{ image_file }}"
 
         - name: Step 7 - confirm it is gone
           when: delete_who.user_input | trim | lower == 'playbook'
           cisco.ios.ios_command:
-            commands: "dir bootflash:"
+            commands: "dir {{ flash_fs }}:"
           register: dir_deleted
           failed_when: dir_deleted.stdout[0] is search('\\s' ~ (image_file | regex_escape) ~ '\\s*$', multiline=True)
 
@@ -364,5 +370,5 @@
             msg: >-
               Hash mismatch for {{ image_file }}.
               {{ 'The playbook deleted the file.' if delete_who.user_input | trim | lower == 'playbook'
-                 else 'The file was left on bootflash for you to delete.' }}
+                 else 'The file was left on ' ~ flash_fs ~ ': for you to delete.' }}
               Copy it again and re-run.

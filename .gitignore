@@ -1,0 +1,5 @@
+reports/
+images/
+collections/
+*.retry
+__pycache__/
